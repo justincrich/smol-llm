@@ -1,378 +1,260 @@
-# 🧠 Local Coding Swarm (Option 2)
-**Simple routing + multiple backends, production-minded, no hair loss**
+# smol-coder
 
----
+A local coding swarm orchestrator that routes coding tasks through Ollama models via LiteLLM, with automatic escalation and verification loops.
 
-# Overview
+## Quick Start
 
-This document describes how to build a **local multi-model coding system** using:
+### Prerequisites
 
-- Multiple model servers (possibly on different machines)
-- A single OpenAI-compatible routing layer (LiteLLM Proxy)
-- Clear escalation rules
-- Real build/test verification loops
+- [Bun](https://bun.sh/) runtime
+- [Docker](https://www.docker.com/) for LiteLLM proxy
+- [Ollama](https://ollama.ai/) with models pulled
 
-It explains:
-
-- Hardware options
-- Model mixes and how they affect output
-- Networking devices together
-- Redundancy + quality controls
-- The “right size” for tasks
-- How to avoid multi-agent chaos
-
-This approach is grounded in three key ideas from small-model research:
-
-1. Cascading reduces cost dramatically while preserving quality by escalating only when needed.
-2. Mixture-of-Agents (MoA) can outperform a single strong model by aggregating diverse proposals.
-3. Verification-aware execution (tests/build loops) enables targeted repair instead of blind rewriting.
-
-The goal is not a research lab system. The goal is:
-
-> A local coding engine that works reliably without building your own distributed AI platform.
-
----
-
-# 🏗 Architecture
-
-## Logical Architecture
-
-```
-IDE / CLI / Automation
-          |
-          v
-+---------------------------+
-| LiteLLM Proxy (Router)    |
-| - model selection         |
-| - fallbacks               |
-| - rate limiting           |
-+-------------+-------------+
-              |
-   +----------+--------------------+
-   |                               |
-   v                               v
-+--------------------+      +--------------------+
-| Fast Model Server  |      | Deep Model Server  |
-| (Ollama)           |      | (vLLM)             |
-| 7B–14B model       |      | 14B–32B model      |
-+--------------------+      +--------------------+
+```bash
+# Pull required models
+ollama pull qwen2.5-coder:7b-instruct   # fast-coder tier
+ollama pull qwen2.5-coder:14b-instruct  # deep-coder tier
+ollama pull qwen2.5:7b-instruct         # reviewer tier
 ```
 
-Optional:
+### Setup
 
+```bash
+# 1. Start Ollama
+ollama serve
+
+# 2. Start LiteLLM proxy
+docker compose up -d
+
+# 3. Verify LiteLLM is running
+curl http://localhost:4000/health
+
+# 4. Install orchestrator dependencies
+cd orchestrator && bun install
 ```
-+--------------------+
-| Reviewer Server    |
-| (7B reasoning)     |
-+--------------------+
+
+### Run
+
+```bash
+# Via stdin
+echo '{"description": "Add a Button component", "filesOwned": ["src/Button.tsx"]}' | \
+  bun run src/index.ts --workspace /path/to/your/project
+
+# Via file
+bun run src/index.ts --workspace /path/to/project --file task.json
+
+# With pretty logs
+echo '{"description": "Fix login bug", "filesOwned": ["src/auth.ts"]}' | \
+  bun run src/index.ts --workspace /path/to/project | bunx pino-pretty
 ```
 
 ---
 
-# 🖥 Hardware Options
+## Task Input Format
 
-## What Matters Most
+```json
+{
+  "description": "Describe what you want done",
+  "filesOwned": ["src/file1.ts", "src/file2.ts"]
+}
+```
 
-- GPU VRAM
-- Memory bandwidth
-- System RAM
-- Disk speed (for builds)
-
-CPU is rarely the bottleneck.
-
----
-
-## Tier 1 — Single Machine (Best Start)
-
-Recommended:
-- RTX 3090 (24GB VRAM)
-- 64GB RAM
-- 2TB NVMe
-- 850–1000W PSU
-
-Why:
-- Can run both fast + deep models
-- Lowest latency
-- Simplest debugging
+| Field | Type | Description |
+|-------|------|-------------|
+| `description` | string | Natural language description of the coding task |
+| `filesOwned` | string[] | Paths to files the model can read and modify |
 
 ---
 
-## Tier 2 — Two-Box Swarm
+## Architecture
 
-Box A (Fast Node)
-- RTX 3060 12GB or 3090
-- 32–64GB RAM
-- Runs Ollama
-
-Box B (Deep Node)
-- 24GB+ GPU
-- 64GB+ RAM
-- Runs vLLM
-
-Impact:
-- Parallelism
-- Deep model isolated from high-volume traffic
-
----
-
-## Tier 3 — Three-Box Swarm
-
-Add:
-
-Box C (Reviewer Node)
-- 12–24GB GPU
-- Smaller reasoning model
-
-Impact:
-- Cleaner repair loops
-- Reduced deep model usage
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│   Orchestrator  │────▶│    LiteLLM      │────▶│     Ollama      │
+│   (Bun/TS)      │     │    (Docker)     │     │     (Host)      │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                                              │
+        │                                              ▼
+        │                                    ┌─────────────────┐
+        │                                    │  qwen2.5-coder  │
+        │                                    │  7b / 14b       │
+        ▼                                    └─────────────────┘
+┌─────────────────┐
+│   Workspace     │
+│   (your code)   │
+└─────────────────┘
+```
 
 ---
 
-# 🤖 Model Mix & Impact
+## Model Tiers & Escalation
 
-## Fast Model (7B–14B)
+The orchestrator uses three model tiers with automatic escalation:
 
-Role:
-- UI generation
-- Small components
-- Boilerplate
-- First-pass fixes
+| Tier | Model | Concurrency | Use Case |
+|------|-------|-------------|----------|
+| `fast` | qwen2.5-coder:7b-instruct | 4 | Simple changes, quick fixes |
+| `deep` | qwen2.5-coder:14b-instruct | 1 | Complex logic, multi-file changes |
+| `reviewer` | qwen2.5:7b-instruct | 2 | Final review, edge cases |
 
-Traits:
-- Fast
-- Cheap
-- May struggle with deep cross-file reasoning
+### Escalation Rules
 
-Handles ~80% of tasks.
-
----
-
-## Deep Model (14B–32B+)
-
-Role:
-- Multi-file refactors
-- Complex TypeScript issues
-- Architecture changes
-- Debugging stubborn build errors
-
-Traits:
-- Slower
-- Higher VRAM
-- Better global reasoning
-
-Used only when needed.
+- 2 failures at current tier → escalate to next tier
+- Maximum 5 total attempts across all tiers
+- Tasks with >5 files or >1000 char descriptions start at `deep` tier
 
 ---
 
-## Reviewer Model (Optional)
+## Verification
 
-Role:
-- Interpret logs
-- Analyze diffs
-- Suggest minimal patches
+After each patch, the orchestrator runs verification commands:
 
-Improves quality while limiting deep model usage.
+1. `bun run typecheck` - TypeScript compilation
+2. `bun run lint` - Linting rules
+3. `bun run build` - Build process
 
----
-
-# 🌐 Networking Devices Together
-
-## Simple LAN Setup
-
-Use:
-- Wired Ethernet (2.5GbE or 10GbE preferred)
-- Static IP addresses
-- Same subnet
-
-Example:
-
-Router: 192.168.1.1  
-LiteLLM: 192.168.1.10  
-Fast Node: 192.168.1.11  
-Deep Node: 192.168.1.12  
-
-LiteLLM routes via:
-
-api_base: http://192.168.1.11:11434/v1/  
-api_base: http://192.168.1.12:8000/v1  
-
-Recommendations:
-- Avoid WiFi for model nodes
-- Use firewall rules to restrict access
-- Keep machines time-synced
-- Use fixed DNS names if possible
+If verification fails, errors are fed back to the model for the next attempt.
 
 ---
 
-# 🔄 Batching Strategy
+## Configuration
 
-## 1) Workflow-Level Parallelism
+### Environment Variables
 
-Split tasks:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LITELLM_URL` | `http://localhost:4000/v1` | LiteLLM proxy URL |
+| `LITELLM_API_KEY` | `dev-key` | API key for LiteLLM |
+| `LOG_LEVEL` | `info` | Pino log level |
+| `NODE_ENV` | - | Set to `production` for JSON logs |
 
-- Header
-- Footer
-- Pricing page
-- Contact page
+### LiteLLM Configuration
 
-Dispatch concurrently to fast model.
+Edit `litellm/config.yaml` to customize model routing:
 
-Safe parallelism = independent file groups.
-
----
-
-## 2) Backend Batching
-
-vLLM dynamically batches requests internally.
-
-Cap concurrency:
-- Fast model: 4–8 requests
-- Deep model: 1–2 requests
-
-Prevents overload.
+```yaml
+model_list:
+  - model_name: fast-coder
+    litellm_params:
+      model: ollama/qwen2.5-coder:7b-instruct
+      api_base: http://host.docker.internal:11434
+```
 
 ---
 
-# 🧪 Quality Controls & Redundancy
+## Log Events
 
-## 1) Mandatory Verification Loop
-
-Always run:
-
-- Lint
-- Typecheck
-- Build
-- Smoke tests
-
-Feed failures back into model.
-
----
-
-## 2) Escalation Rules
-
-- 2 failed attempts → escalate
-- 3 failed attempts → stop and report
-
-No infinite loops.
+| Event | Description |
+|-------|-------------|
+| `task_created` | New task initialized |
+| `model_call_start` | LLM request started |
+| `model_call_complete` | LLM response received |
+| `patch_applied` | Diff successfully applied |
+| `patch_rejected` | Diff rejected (parse error or too large) |
+| `verification_start` | Running verification commands |
+| `verification_pass` | All checks passed |
+| `verification_fail` | One or more checks failed |
+| `escalation` | Moving to higher tier |
+| `task_complete` | Task finished successfully |
+| `task_abort` | Max attempts reached |
 
 ---
 
-## 3) Patch Size Limits
+## Limits
 
-- Limit diff size
-- Avoid full rewrites
-- One task owns a file at a time
-
----
-
-## 4) Fallback Routing
-
-If fast model errors → automatically try deep model.
+| Limit | Value |
+|-------|-------|
+| Max patch size | 300 lines |
+| Max attempts per tier | 2 |
+| Max total attempts | 5 |
+| Verification timeout | 60 seconds |
 
 ---
 
-## 5) Optional MoA Mode
+## Project Structure
 
-For critical tasks:
-
-- Run 2 fast proposals
-- Run 1 deep proposal
-- Select best via tests
+```
+smol-coder/
+├── compose.yaml              # LiteLLM Docker config
+├── litellm/
+│   └── config.yaml           # Model routing
+├── orchestrator/
+│   ├── package.json
+│   ├── tsconfig.json
+│   └── src/
+│       ├── index.ts          # CLI entry point
+│       ├── types.ts          # Type definitions
+│       ├── telemetry.ts      # Pino logger
+│       ├── router.ts         # Model selection + semaphores
+│       ├── executor.ts       # LLM calls + patch handling
+│       ├── verifier.ts       # Build verification
+│       └── policy.ts         # Escalation rules
+└── logs/                     # Log output directory
+```
 
 ---
 
-# 📏 Right Task Size for Small Agents
+## Troubleshooting
 
-## Too Small
-“Add one div.”
+### LiteLLM not connecting to Ollama
 
-Not worth orchestration.
+Ensure Ollama is running and accessible:
+```bash
+curl http://localhost:11434/api/tags
+```
 
-## Too Big
-“Rewrite the entire app.”
+On Docker Desktop, the container uses `host.docker.internal` to reach the host.
 
-Causes thrashing.
+### Patches not applying
+
+The orchestrator uses `patch -p1`. Ensure your workspace is a git repository or has the expected file structure.
+
+### Model not found
+
+Pull the required models:
+```bash
+ollama pull qwen2.5-coder:7b-instruct
+ollama pull qwen2.5-coder:14b-instruct
+ollama pull qwen2.5:7b-instruct
+```
 
 ---
 
-## Ideal Task Characteristics
+## Development
+
+```bash
+cd orchestrator
+
+# Type check
+bun run typecheck
+
+# Run with pretty logs
+bun run dev
+```
+
+---
+
+## Design Philosophy
+
+This system is grounded in three key ideas from small-model research:
+
+1. **Cascading** reduces cost dramatically while preserving quality by escalating only when needed
+2. **Verification-aware execution** (tests/build loops) enables targeted repair instead of blind rewriting
+3. **Right-sized tasks** work reliably with small models
+
+### Ideal Task Characteristics
 
 A good task:
-
 - Modifies ≤ 3 files
 - Changes ≤ 200 lines
 - Is independently verifiable
 - Has clear input/output boundaries
 
-Good:
-- Implement Header component
-- Fix failing test
-- Add form validation
-
-Bad:
-- Redesign entire system
-- Migrate whole repo
-
-Heuristic:
-If it can’t be validated by a specific test or build check, it’s too big.
-
----
-
-# 🚫 What This Avoids
+### What This Avoids
 
 - No agent negotiation layers
 - No custom distributed protocol
 - No Kubernetes
-- No CRDT systems
 - No research infrastructure
 
-Just:
-
-- Model servers
-- One router
-- Clear escalation
-- Verification gates
-- Concurrency limits
-
----
-
-# 🧠 Final System Summary
-
-```
-You
-  ↓
-IDE / CLI
-  ↓
-LiteLLM Router
-  ↓
-Fast Model (default)
-  ↓ (if needed)
-Deep Model (escalation)
-  ↓
-Verification Loop
-  ↓
-Done
-```
-
----
-
-# Core Principle
-
-Small models work when:
-
-- Tasks are right-sized
-- Verification is mandatory
-- Escalation is controlled
-- Routing is explicit
-- Retry loops are bounded
-
-You do not need a research lab.
-
-You need:
-- 1 router
-- 2 models
-- Good rules
-- Tests
-
-That’s the right-sized local coding swarm.
+Just: model servers, one router, clear escalation, verification gates, and concurrency limits.

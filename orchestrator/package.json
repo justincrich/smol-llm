@@ -1,0 +1,19 @@
+{
+  "name": "smol-coder-orchestrator",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun run src/index.ts | bunx pino-pretty",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "openai": "^4.77.0",
+    "pino": "^8.21.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "pino-pretty": "^10.3.1",
+    "typescript": "^5.7.0"
+  }
+}
